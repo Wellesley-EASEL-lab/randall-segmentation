@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Randall cluster-assisted review</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='cluster_review.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Cluster-assisted marginal review</h1>
+    <p>Cluster majorities are suggestions only. They never change a review decision.</p>
+    <form method="get">
+      <label>Cluster
+        <select name="cluster" onchange="this.form.submit()">
+          {% for cluster in clusters %}
+          <option value="{{ cluster.cluster_label }}" {% if cluster.cluster_label == cluster_label %}selected{% endif %}>
+            {{ cluster.cluster_label }} · {{ cluster.visible_count }} visible · suggestion {{ cluster.majority_label_name or 'none' }} · purity {{ '%.3f'|format(cluster.purity) if cluster.purity is not none else 'n/a' }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label><input type="checkbox" name="show_checked" value="1" {% if show_checked %}checked{% endif %} onchange="this.form.submit()"> Show checked</label>
+    </form>
+  </header>
+  <main class="grid">
+    {% for asset in assets %}
+    <article class="card {% if asset.checked %}checked {% if asset.include %}included{% else %}excluded{% endif %}{% elif asset.majority_label == 1 %}suggest-include{% elif asset.majority_label == 0 %}suggest-exclude{% endif %}">
+      <a href="{{ url_for('asset', asset_id=asset.asset_id, kind='source') }}" target="_blank">
+        <img src="{{ url_for('asset', asset_id=asset.asset_id, kind='crop') }}" alt="{{ asset.asset_id }}" loading="lazy">
+      </a>
+      <div class="meta">{{ asset.manuscript }} · {{ asset.page }}</div>
+      <form method="post" action="{{ url_for('update', asset_id=asset.asset_id) }}">
+        <input type="hidden" name="cluster" value="{{ cluster_label }}">
+        <input type="hidden" name="page" value="{{ page }}">
+        {% if show_checked %}<input type="hidden" name="show_checked" value="1">{% endif %}
+        <label><input type="checkbox" name="checked" value="1" {% if asset.checked %}checked{% endif %}> checked</label>
+        <label><input type="checkbox" name="include" value="1" {% if asset.include %}checked{% endif %}> include</label>
+        <label><input type="checkbox" name="query" value="1" {% if asset.query %}checked{% endif %}> query</label>
+        <textarea name="notes" rows="2" placeholder="Notes">{{ asset.notes }}</textarea>
+        <button type="submit">Save</button>
+      </form>
+    </article>
+    {% else %}
+    <p>No images are visible for this cluster.</p>
+    {% endfor %}
+  </main>
+  <nav>
+    {% if page > 1 %}<a href="{{ url_for('index', cluster=cluster_label, page=page-1, show_checked='1' if show_checked else '') }}">Previous</a>{% endif %}
+    <a href="{{ url_for('index', cluster=cluster_label, page=page+1, show_checked='1' if show_checked else '') }}">Next</a>
+  </nav>
+</body>
+</html>
+
