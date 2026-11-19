@@ -8,9 +8,9 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from randall_pipeline.constants import OPEN_SEGMENTATIONS
+from randall_pipeline import extraction
+from randall_pipeline.constants import ID2LABEL, OPEN_SEGMENTATIONS
 from randall_pipeline.datasets import iter_records, resolved_revision
-from randall_pipeline.extraction import extract_record, records_from_predictions, write_inventory
 from randall_pipeline.io import write_json_atomic
 
 
@@ -26,9 +26,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--class-id", type=int, default=2)
     parser.add_argument("--margin", type=float, default=0.05)
-    parser.add_argument("--min-fraction", type=float, default=0.005)
-    parser.add_argument("--merge", action="store_true")
-    parser.add_argument("--merge-tolerance", type=float, default=0.0)
+    parser.add_argument("--min-fraction", type=float, default=extraction.DEFAULT_MIN_FRACTION)
+    parser.add_argument("--merge", action="store_true", help="Merge strongest candidates within the crop limits.")
+    parser.add_argument("--merge-tolerance", type=float, default=extraction.DEFAULT_MERGE_TOLERANCE)
+    parser.add_argument("--max-merged-bbox-area-fraction", type=float,
+                        default=extraction.DEFAULT_MAX_MERGED_BBOX_AREA_FRACTION,
+                        help="Maximum fraction of page area in a proposed merged crop (0 disables).")
+    parser.add_argument("--max-merged-bbox-dimension-fraction", type=float,
+                        default=extraction.DEFAULT_MAX_MERGED_BBOX_DIMENSION_FRACTION,
+                        help="Maximum fraction of page width or height in a proposed merged crop (0 disables).")
+    parser.add_argument("--min-merged-target-density", type=float,
+                        default=extraction.DEFAULT_MIN_MERGED_TARGET_DENSITY,
+                        help="Minimum target pixel fraction in a proposed merged crop (0 disables).")
+    parser.add_argument("--border-class-id", type=int, choices=ID2LABEL, action="append",
+                        help="Class providing border evidence between components (repeatable, defaults to borders).")
     parser.add_argument("--draw-bbox", action="store_true")
     return parser.parse_args()
 
@@ -37,7 +48,7 @@ def main() -> None:
     args = parse_args()
     revision = None
     if args.predictions_jsonl:
-        records = records_from_predictions(args.predictions_jsonl, split=args.split)
+        records = extraction.records_from_predictions(args.predictions_jsonl, split=args.split)
         materialize = True
         source_description = str(args.predictions_jsonl)
     else:
@@ -49,15 +60,22 @@ def main() -> None:
         )
         materialize = True
         source_description = repo_id
+    merge_options = {
+        "merge": args.merge,
+        "merge_tolerance": args.merge_tolerance,
+        "max_merged_bbox_area_fraction": args.max_merged_bbox_area_fraction,
+        "max_merged_bbox_dimension_fraction": args.max_merged_bbox_dimension_fraction,
+        "min_merged_target_density": args.min_merged_target_density,
+        "border_class_ids": args.border_class_id or extraction.DEFAULT_BORDER_CLASSES,
+    }
     rows = []
     for record in tqdm(records, desc="Extracting marginals", unit="page"):
-        rows.extend(extract_record(
+        rows.extend(extraction.extract_record(
             record, args.output_dir, class_id=args.class_id, margin=args.margin,
-            min_fraction=args.min_fraction, merge=args.merge,
-            merge_tolerance=args.merge_tolerance, draw_bbox=args.draw_bbox,
+            min_fraction=args.min_fraction, draw_bbox=args.draw_bbox, **merge_options,
             materialize_inputs=materialize,
         ))
-    inventory = write_inventory(args.output_dir, rows)
+    inventory = extraction.write_inventory(args.output_dir, rows)
     write_json_atomic(args.output_dir / "extraction_run.json", {
         "source": source_description,
         "resolved_revision": revision,
@@ -65,8 +83,8 @@ def main() -> None:
         "class_id": args.class_id,
         "margin": args.margin,
         "min_fraction": args.min_fraction,
-        "merge": args.merge,
-        "merge_tolerance": args.merge_tolerance,
+        **merge_options,
+        "draw_bbox": args.draw_bbox,
         "regions_written": len(rows),
     })
     print(f"Wrote {len(rows)} marginal crops and {inventory}")

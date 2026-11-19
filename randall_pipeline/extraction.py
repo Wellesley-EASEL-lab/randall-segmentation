@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -11,12 +11,17 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import label
 
-from .constants import REVIEW_FIELDS
+from .constants import ID2LABEL, REVIEW_FIELDS
 from .datasets import SegmentationRecord
 from .io import class_mask, relative_or_absolute, stable_id, write_csv_atomic
+from .merge import Box, merge_boxes_strongest_first
 
-
-Box = tuple[int, int, int, int]
+DEFAULT_MIN_FRACTION = 0.0005
+DEFAULT_MERGE_TOLERANCE = 0.001
+DEFAULT_MAX_MERGED_BBOX_AREA_FRACTION = 0.50
+DEFAULT_MAX_MERGED_BBOX_DIMENSION_FRACTION = 0.95
+DEFAULT_MIN_MERGED_TARGET_DENSITY = 0.01
+DEFAULT_BORDER_CLASSES = tuple(i for i, name in ID2LABEL.items() if "border" in name.lower())
 
 
 def _overlap(a: Box, b: Box, tolerance: int = 0) -> bool:
@@ -24,6 +29,7 @@ def _overlap(a: Box, b: Box, tolerance: int = 0) -> bool:
 
 
 def merge_boxes(boxes: list[Box], tolerance: int = 0) -> list[Box]:
+    """Legacy box-only union for callers without a segmentation mask."""
     pending = list(boxes)
     changed = True
     while changed:
@@ -70,9 +76,13 @@ def extract_record(
     *,
     class_id: int = 2,
     margin: float = 0.05,
-    min_fraction: float = 0.005,
+    min_fraction: float = DEFAULT_MIN_FRACTION,
     merge: bool = False,
-    merge_tolerance: float = 0.0,
+    merge_tolerance: float = DEFAULT_MERGE_TOLERANCE,
+    max_merged_bbox_area_fraction: float = DEFAULT_MAX_MERGED_BBOX_AREA_FRACTION,
+    max_merged_bbox_dimension_fraction: float = DEFAULT_MAX_MERGED_BBOX_DIMENSION_FRACTION,
+    min_merged_target_density: float = DEFAULT_MIN_MERGED_TARGET_DENSITY,
+    border_class_ids: Iterable[int] = DEFAULT_BORDER_CLASSES,
     draw_bbox: bool = False,
     materialize_inputs: bool = False,
 ) -> list[dict[str, object]]:
@@ -81,9 +91,42 @@ def extract_record(
         raise ValueError(f"{record.asset_id}: image/mask dimensions differ")
     width, height = image.size
     binary = class_mask(record.mask, class_id)
+    if not math.isfinite(margin) or margin < 0:
+        raise ValueError("margin must be finite and nonnegative")
+    if not math.isfinite(merge_tolerance) or merge_tolerance < 0:
+        raise ValueError("merge tolerance must be finite and nonnegative")
+    for fraction in (max_merged_bbox_area_fraction, max_merged_bbox_dimension_fraction, min_merged_target_density):
+        if not 0 <= fraction <= 1:
+            raise ValueError("merged crop fractions must be between 0 and 1")
+
     boxes = component_boxes(binary, min_pixels=int(width * height * min_fraction))
     if merge:
-        boxes = merge_boxes(boxes, int(round(max(width, height) * merge_tolerance)))
+        # The constrained extractor measures tight bounds between extreme pixel
+        # coordinates. Convert our half-open component boxes before scoring.
+        pad = int(max(width, height) * margin)
+        regions = []
+        for left, top, right, bottom in boxes:
+            tight = (left, top, right - 1, bottom - 1)
+            crop = (max(0, left - pad), max(0, top - pad),
+                    min(width, right - 1 + pad), min(height, bottom - 1 + pad))
+            if crop[0] < crop[2] and crop[1] < crop[3]:
+                regions.append((tight, crop))
+        if len(regions) > 1:
+            border = np.zeros_like(binary)
+            for border_id in border_class_ids:
+                border |= class_mask(record.mask, border_id)
+            regions = merge_boxes_strongest_first(
+                regions, int(max(width, height) * merge_tolerance), binary, border,
+                max_merged_bbox_area_fraction, max_merged_bbox_dimension_fraction,
+                min_merged_target_density,
+            )
+        # Inventory IDs and drawing use half-open tight boxes.
+        regions = [
+            ((left, top, right + 1, bottom + 1), crop)
+            for (left, top, right, bottom), crop in regions
+        ]
+    else:
+        regions = [(box, add_margin(box, width, height, margin)) for box in boxes]
     output_root.mkdir(parents=True, exist_ok=True)
     source_path = Path(record.source_path) if record.source_path else None
     segmentation_path: Path | None = None
@@ -97,8 +140,7 @@ def extract_record(
     crop_dir = output_root / ("marginals-bbox" if draw_bbox else "marginals")
     crop_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
-    for region_index, tight in enumerate(boxes):
-        expanded = add_margin(tight, width, height, margin)
+    for region_index, (tight, expanded) in enumerate(regions):
         crop = image.crop(expanded)
         if draw_bbox:
             draw = ImageDraw.Draw(crop)

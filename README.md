@@ -83,8 +83,8 @@ python -m scripts.predict_segmentations \
 
 This writes reassembled segmentation masks plus `predictions.jsonl`.
 
-Following **Extracting Marginal Segments**, form boxes around connected
-marginal-image regions, merge nearby regions, and filter very small candidates:
+Following **Extracting Marginal Segments**, filter connected marginal-image regions
+(class 2) by size, then use `--merge` to combine nearby regions.
 
 ```bash
 python -m scripts.extract_marginals \
@@ -94,7 +94,26 @@ python -m scripts.extract_marginals \
   --merge
 ```
 
-This writes cropped candidate images and `marginal_inventory.csv`.
+The minimum component area defaults to 0.0005 of the page (0.05%).
+With `--merge`, the extractor expands each tight box by `--merge-tolerance`
+(default 0.001 of the longer page dimension) to find candidate pairs.
+It considers the strongest pairs first, using overlap, proximity, and border
+pixels between the regions (class 5 by default, configurable with repeated
+`--border-class-id`). It checks each proposed crop, including its margin
+(default 0.05 of the longer page dimension), against these limits.
+
+| Option | Default | What it measures |
+| --- | ---: | --- |
+| `--max-merged-bbox-area-fraction` | 0.50 | Maximum crop area divided by page area |
+| `--max-merged-bbox-dimension-fraction` | 0.95 | Maximum crop width divided by page width and crop height divided by page height |
+| `--min-merged-target-density` | 0.01 | Minimum fraction of crop pixels belonging to the target class |
+
+Set a limit to 0 to disable that check. A component contained within an
+existing crop can join it without enlarging it. Omit `--merge` to extract
+components separately.
+
+The command writes candidate PNGs, `marginal_inventory.csv`, and the effective
+settings in `extraction_run.json`.
 
 ## 4. Review individual candidates
 
